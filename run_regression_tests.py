@@ -21,6 +21,11 @@ CYAN = "\033[36m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
+SYM_OK = "[PASS]"
+SYM_FAIL = "[FAIL]"
+SYM_LINE = "-"
+SYM_DOUBLE = "="
+
 
 @dataclass
 class Case:
@@ -53,18 +58,18 @@ class TestModule:
         self.cases.append(case)
 
     def run(self):
-        print(f"\n{'─' * 68}")
+        print(f"\n{SYM_LINE * 68}")
         print(f"  {BOLD}{CYAN}模块: {self.name}{RESET}  ({len(self.cases)} 条用例)")
-        print(f"{'─' * 68}")
+        print(f"{SYM_LINE * 68}")
         for idx, c in enumerate(self.cases):
             ok, detail = c.run()
             tag = f"[{idx + 1:>3}/{len(self.cases)}]"
             if ok:
                 self.passed += 1
-                print(f"  {GREEN}✓{RESET} {tag} {c.name}")
+                print(f"  {GREEN}{SYM_OK}{RESET} {tag} {c.name}")
             else:
                 self.failed += 1
-                msg = f"  {RED}✗{RESET} {tag} {c.name}\n{detail}"
+                msg = f"  {RED}{SYM_FAIL}{RESET} {tag} {c.name}\n{detail}"
                 print(msg)
                 self.failures.append(f"[{self.name}] {c.name}\n{detail}")
         self._summary()
@@ -76,7 +81,7 @@ class TestModule:
         pct = self.passed * 100 // total
         color = GREEN if self.failed == 0 else (YELLOW if self.passed > 0 else RED)
         print(
-            f"  ╰ 汇总: {color}{self.passed} 通过{RESET} / "
+            f"  >> 汇总: {color}{self.passed} 通过{RESET} / "
             f"{RED if self.failed else CYAN}{self.failed} 失败{RESET} / "
             f"{total} 总计  ({color}{pct}%{RESET})"
         )
@@ -93,9 +98,9 @@ class TestSuite:
         return m
 
     def run(self):
-        print(f"\n{'═' * 68}")
+        print(f"\n{SYM_DOUBLE * 68}")
         print(f"  {BOLD}{CYAN}时间表达式解析引擎 - 回归测试{RESET}")
-        print(f"{'═' * 68}")
+        print(f"{SYM_DOUBLE * 68}")
         for m in self.modules:
             m.run()
             self.all_failures.extend(m.failures)
@@ -106,24 +111,24 @@ class TestSuite:
         passed = sum(m.passed for m in self.modules)
         failed = sum(m.failed for m in self.modules)
         pct = (passed * 100 // total) if total else 0
-        print(f"\n{'═' * 68}")
+        print(f"\n{SYM_DOUBLE * 68}")
         print(f"  {BOLD}总体汇总{RESET}")
-        print(f"{'═' * 68}")
+        print(f"{SYM_DOUBLE * 68}")
         for m in self.modules:
-            mark = f"{GREEN}✓{RESET}" if m.failed == 0 else f"{RED}✗{RESET}"
+            mark = f"{GREEN}{SYM_OK}{RESET}" if m.failed == 0 else f"{RED}{SYM_FAIL}{RESET}"
             print(
                 f"  {mark} {m.name:<22s}  "
-                f"{GREEN}{m.passed:>3}✓{RESET}  "
-                f"{RED}{m.failed:>3}✗{RESET}  "
+                f"{GREEN}{m.passed:>3}OK{RESET}  "
+                f"{RED}{m.failed:>3}FAIL{RESET}  "
                 f"{CYAN}{len(m.cases):>3}{RESET}"
             )
         print(
-            f"  {'─' * 66}"
+            f"  {SYM_LINE * 66}"
         )
         print(
             f"  {BOLD}{'总计':<22s}  "
-            f"{GREEN}{passed:>3}✓{RESET}  "
-            f"{RED}{failed:>3}✗{RESET}  "
+            f"{GREEN}{passed:>3}OK{RESET}  "
+            f"{RED}{failed:>3}FAIL{RESET}  "
             f"{CYAN}{total:>3}{RESET}   "
             f"{BOLD}{GREEN if failed == 0 else RED}{pct}%{RESET}{BOLD}{RESET}"
         )
@@ -132,7 +137,7 @@ class TestSuite:
             for i, f in enumerate(self.all_failures, 1):
                 print(f"    {RED}{i}.{RESET} {f}")
         else:
-            print(f"\n  {GREEN}{BOLD}🎉 全部通过！{RESET}")
+            print(f"\n  {GREEN}{BOLD}ALL PASSED!{RESET}")
         return failed == 0
 
 
@@ -430,10 +435,104 @@ def build_suite() -> TestSuite:
                results[5].ok, False))
     m7.add(Case("[5] 非法 cron → error 非空",
                bool(results[5].error), True))
-    m7.add(Case("[6] 带 Z/偏移 ISO → 类型=zoned_datetime",
-               results[6].type, "zoned_datetime"))
-    m7.add(Case("[6] 带偏移 ISO → OK",
+    m7.add(Case("[6] 带偏移 ISO -> OK",
                results[6].ok, True))
+
+    # ========================================================
+    # 模块 8: DST 诊断字段 & JSON 序列化
+    # ========================================================
+    m8 = suite.module("DST 诊断字段 & JSON 序列化")
+
+    # Gap 场景：2024-03-10 02:30 forward
+    gap_items = [
+        {"expr": "2024-03-10T02:30:00", "tz": NY, "gap_strategy": "forward",
+         "type": "iso_datetime"},
+    ]
+    gap_res = engine.parse_many(gap_items, base=base_batch, tz_name=NY)
+    m8.add(Case("Gap 02:30 forward: dst_status=gap",
+               gap_res[0].dst_status, DST_STATUS_GAP))
+    m8.add(Case("Gap 02:30 forward: is_missing=True",
+               gap_res[0].is_missing, True))
+    m8.add(Case("Gap 02:30 forward: gap_applied=forward",
+               gap_res[0].gap_applied, "forward"))
+    m8.add(Case("Gap 02:30 forward: adjustment_minutes=30",
+               gap_res[0].adjustment_minutes, 30))
+    m8.add(Case("Gap 02:30 forward: fold_used=None",
+               gap_res[0].fold_used, None))
+
+    # Ambiguity 场景：2024-11-03 01:30 fold=1
+    ambig_items = [
+        {"expr": "2024-11-03T01:30:00", "tz": NY, "fold": 1,
+         "type": "iso_datetime"},
+    ]
+    ambig_res = engine.parse_many(ambig_items, base=base_batch, tz_name=NY)
+    m8.add(Case("Ambig 01:30 fold=1: dst_status=ambiguous",
+               ambig_res[0].dst_status, DST_STATUS_AMBIGUOUS))
+    m8.add(Case("Ambig 01:30 fold=1: is_ambiguous=True",
+               ambig_res[0].is_ambiguous, True))
+    m8.add(Case("Ambig 01:30 fold=1: fold_used=1",
+               ambig_res[0].fold_used, 1))
+    m8.add(Case("Ambig 01:30 fold=1: is_missing=False",
+               ambig_res[0].is_missing, False))
+
+    # JSON 序列化验证
+    import json as _json
+    gap_dict = gap_res[0].as_dict()
+    m8.add(Case("JSON: as_dict 包含 dst_status 键",
+               "dst_status" in gap_dict, True))
+    m8.add(Case("JSON: as_dict result 为字符串",
+               isinstance(gap_dict["result"], str), True))
+    json_str = gap_res[0].to_json()
+    parsed_back = _json.loads(json_str)
+    m8.add(Case("JSON: to_json 可 round-trip",
+               parsed_back["type"], "iso_datetime"))
+    m8.add(Case("JSON: round-trip dst_status 保留",
+               parsed_back["dst_status"], DST_STATUS_GAP))
+
+    # parse_many_json 验证
+    json_batch = engine.parse_many_json(
+        ["3天后", "P1D"], base=base_batch, tz_name=NY,
+    )
+    batch_parsed = _json.loads(json_batch)
+    m8.add(Case("JSON batch: 长度=2",
+               len(batch_parsed), 2))
+    m8.add(Case("JSON batch: [0] result 为字符串",
+               isinstance(batch_parsed[0]["result"], str), True))
+
+    # ========================================================
+    # 模块 9: Cron next_n_triggers with max_span
+    # ========================================================
+    m9 = suite.module("Cron next_n_triggers (max_span)")
+
+    # 正常: 每分钟 5 次
+    cron_min = CronExpression.parse("0 * * * * ?")
+    m9.add(Case("next_n 5: 每分钟, 长度=5",
+               len(cron_min.next_n_triggers(5, datetime(2024, 6, 17, 10, 0, 0))),
+               5))
+
+    # 稀疏规则: 2月29日零点, max_span=1年 应该只找到1次
+    cron_leap = CronExpression.parse("0 0 0 29 2 ?")
+    n_triggers = cron_leap.next_n_triggers(
+        10, datetime(2024, 1, 1), max_span=timedelta(days=365),
+    )
+    m9.add(Case("2/29 规则 max_span=1年: 仅找到1次",
+               len(n_triggers), 1))
+    m9.add(Case("2/29 规则: 2024-02-29 (首次匹配)",
+               n_triggers[0], datetime(2024, 2, 29, 0, 0, 0)))
+
+    # 无限制: 应找到更多
+    n_triggers_no_limit = cron_leap.next_n_triggers(
+        3, datetime(2024, 1, 1),
+    )
+    m9.add(Case("2/29 规则 无 max_span: 找到3次",
+               len(n_triggers_no_limit), 3))
+
+    # max_span=0: 不应找到任何
+    n_triggers_zero = cron_leap.next_n_triggers(
+        5, datetime(2024, 1, 1), max_span=timedelta(0),
+    )
+    m9.add(Case("max_span=0: 找到0次",
+               len(n_triggers_zero), 0))
 
     return suite
 

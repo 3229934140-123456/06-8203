@@ -678,12 +678,34 @@ class CronExpression:
         self,
         n: int,
         base: Optional[datetime] = None,
+        max_span: Optional[timedelta] = None,
     ) -> List[datetime]:
-        """获取接下来 n 个触发时间。"""
-        result = []
+        """
+        获取接下来 n 个触发时间。
+
+        参数:
+            n:        需要的触发次数
+            base:     起始基准时间（不含自身）
+            max_span: 最大查找跨度（如 timedelta(days=365)）。
+                      超出跨度的后续触发不再计算，直接返回已找到的。
+                      防止 "2月29日" 这种极稀疏规则搜索过久。
+
+        返回:
+            触发时间列表，长度 <= n（当触达 max_span 时可能少于 n）
+        """
+        if base is None:
+            base = datetime.now()
+
+        deadline = None
+        if max_span is not None:
+            deadline = base + max_span
+
+        result: List[datetime] = []
         current = base
         for _ in range(n):
             current = self.next_trigger(current)
+            if deadline is not None and current > deadline:
+                break
             result.append(current)
         return result
 

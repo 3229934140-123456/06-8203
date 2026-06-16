@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json as _json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone as tz
 from typing import Any, Dict, List, Optional, Union
@@ -8,7 +9,13 @@ from calendar_utils import CalendarArithmetic
 from duration import ISODuration
 from relative_time import RelativeTimeParser
 from cron_parser import CronExpression, CronField
-from timezone_utils import TimezoneHandler
+from timezone_utils import (
+    TimezoneHandler,
+    LocalizeResult,
+    DST_STATUS_NORMAL,
+    DST_STATUS_GAP,
+    DST_STATUS_AMBIGUOUS,
+)
 
 
 EXPRESSION_TYPE_RELATIVE = "relative_time"
@@ -17,6 +24,29 @@ EXPRESSION_TYPE_ISO_DURATION = "iso_duration"
 EXPRESSION_TYPE_ISO_DATETIME = "iso_datetime"
 EXPRESSION_TYPE_ZONED_DATETIME = "zoned_datetime"
 EXPRESSION_TYPE_UNKNOWN = "unknown"
+
+
+def _fmt_dt(dt: Any) -> Optional[str]:
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        if dt.tzinfo is not None:
+            return dt.isoformat()
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+    return str(dt)
+
+
+def _fmt_offset(td: Any) -> Optional[str]:
+    if td is None:
+        return None
+    if isinstance(td, timedelta):
+        total = int(td.total_seconds())
+        sign = "+" if total >= 0 else "-"
+        total = abs(total)
+        h, rem = divmod(total, 3600)
+        m, s = divmod(rem, 60)
+        return f"{sign}{h:02d}:{m:02d}" + (f":{s:02d}" if s else "")
+    return str(td)
 
 
 @dataclass
@@ -30,15 +60,60 @@ class ParseResult:
     error: Optional[str] = None
     meta: Dict[str, Any] = field(default_factory=dict)
 
+    # DST 诊断字段（仅 iso_datetime / zoned_datetime 涉及时区本地化时填充）
+    dst_status: str = DST_STATUS_NORMAL
+    is_missing: bool = False
+    is_ambiguous: bool = False
+    gap_applied: Optional[str] = None
+    fold_used: Optional[int] = None
+    adjustment_minutes: int = 0
+
     def as_dict(self) -> Dict[str, Any]:
-        return {
+        d: Dict[str, Any] = {
             "raw": self.raw,
             "type": self.type,
             "ok": self.ok,
-            "result": self.result,
+            "result": _fmt_dt(self.result),
             "error": self.error,
-            "meta": self.meta,
         }
+        if self.dst_status != DST_STATUS_NORMAL:
+            d["dst_status"] = self.dst_status
+            d["is_missing"] = self.is_missing
+            d["is_ambiguous"] = self.is_ambiguous
+            if self.gap_applied:
+                d["gap_applied"] = self.gap_applied
+            if self.fold_used is not None:
+                d["fold_used"] = self.fold_used
+            if self.adjustment_minutes != 0:
+                d["adjustment_minutes"] = self.adjustment_minutes
+        if self.meta:
+            meta_ser: Dict[str, Any] = {}
+            for k, v in self.meta.items():
+                if k == "duration":
+                    meta_ser[k] = v
+                elif k == "utc_offset":
+                    meta_ser[k] = _fmt_offset(v)
+                elif k == "cron_fields":
+                    meta_ser[k] = str(v)
+                elif isinstance(v, datetime):
+                    meta_ser[k] = _fmt_dt(v)
+                elif isinstance(v, timedelta):
+                    meta_ser[k] = _fmt_offset(v)
+                else:
+                    meta_ser[k] = v
+            d["meta"] = meta_ser
+        return d
+
+    def to_json(self, **kwargs) -> str:
+        return _json.dumps(self.as_dict(), ensure_ascii=False, **kwargs)
+
+    @staticmethod
+    def results_to_json(results: List["ParseResult"], **kwargs) -> str:
+        return _json.dumps(
+            [r.as_dict() for r in results],
+            ensure_ascii=False,
+            **kwargs,
+        )
 
 
 class TimeExpressionEngine:
@@ -447,9 +522,19 @@ class TimeExpressionEngine:
                     r.ok = True
                     return
                 if dt.tzinfo is None and tz_name:
-                    localized = TimezoneHandler.localize(dt, tz_name, fold, gap_strategy)
-                    r.result = localized
+                    diag = TimezoneHandler.localize_with_diagnosis(
+                        dt, tz_name, fold, gap_strategy,
+                    )
+                    r.result = diag.datetime
+                    r.dst_status = diag.dst_status
+                    r.is_missing = diag.is_missing
+                    r.is_ambiguous = diag.is_ambiguous
+                    r.gap_applied = diag.gap_applied
+                    r.fold_used = diag.fold_used
+                    r.adjustment_minutes = diag.adjustment_minutes
                     r.meta["timezone"] = tz_name
+                    r.meta["utc_offset"] = diag.meta.get("utc_offset")
+                    r.meta["is_dst"] = diag.meta.get("is_dst")
                 else:
                     r.result = dt
                 r.ok = True
@@ -477,3 +562,28 @@ class TimeExpressionEngine:
             bucket["total"] += 1
             bucket["ok" if r.ok else "fail"] += 1
         return {"total": total, "ok": passed, "fail": total - passed, "by_type": by_type}
+
+    def parse_many_json(
+        self,
+        expressions: List[Union[str, Dict[str, Any]]],
+        base: Optional[datetime] = None,
+        tz_name: Optional[str] = None,
+        fold: int = 0,
+        gap_strategy: str = "forward",
+        indent: int = 2,
+    ) -> str:
+        """
+        批量解析并直接返回 JSON 字符串，方便服务端 / 命令行管道接入。
+
+        JSON 格式稳定保证:
+          - result 始终为 ISO 8601 字符串（带/不带时区偏移）
+          - error 保留原始文本和原因
+          - DST 诊断仅在非 normal 时出现
+          - meta.duration 为数值字典
+          - meta.utc_offset 为 "+HH:MM" 字符串
+        """
+        results = self.parse_many(
+            expressions, base=base, tz_name=tz_name,
+            fold=fold, gap_strategy=gap_strategy,
+        )
+        return ParseResult.results_to_json(results, indent=indent)

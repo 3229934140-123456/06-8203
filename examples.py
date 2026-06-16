@@ -325,9 +325,9 @@ def demo_cron_advanced():
     for expr, desc in cases:
         try:
             next_t = CronExpression.parse(expr).next_trigger(base)
-            print(f"  {desc:<30s}  [{expr:<22s}]  →  {next_t.strftime('%Y-%m-%d %A %H:%M:%S')}")
+            print(f"  {desc:<30s}  [{expr:<22s}]  =>  {next_t.strftime('%Y-%m-%d %A %H:%M:%S')}")
         except Exception as e:
-            print(f"  {desc:<30s}  [{expr:<22s}]  →  ERROR: {e}")
+            print(f"  {desc:<30s}  [{expr:<22s}]  =>  ERROR: {e}")
 
 
 def demo_timezone_diagnosis():
@@ -347,15 +347,15 @@ def demo_timezone_diagnosis():
         (datetime(2024, 11, 3, 1, 30, 0),   1, "forward", "Fall Back ambiguous fold=1"),
         (datetime(2024, 11, 3, 2, 0, 1),    0, "forward", "Fall Back 之后"),
     ]
-    print(f"  {'场景说明':<28s} {'原始时间':<20s} → 结果时间       dst_status   gap/fold    调整  is_dst")
-    print(f"  {'─' * 108}")
+    print(f"  {'场景说明':<28s} {'原始时间':<20s} => 结果时间       dst_status   gap/fold    调整  is_dst")
+    print(f"  {'-' * 108}")
     for naive, fold, strat, desc in cases:
         try:
             r = H.localize_with_diagnosis(naive, NY, fold=fold, gap_strategy=strat)
             line = (
                 f"  {desc:<28s} "
                 f"{r.original_local.strftime('%m-%d %H:%M:%S'):<20s} "
-                f"→ {r.datetime.strftime('%m-%d %H:%M:%S%z'):<22s} "
+                f"=> {r.datetime.strftime('%m-%d %H:%M:%S%z'):<22s} "
                 f"{r.dst_status:<12s} "
                 f"{(r.gap_applied or (f'fold={r.fold_used}' if r.fold_used is not None else '—')):<11s} "
                 f"{r.adjustment_minutes:+3d}分 "
@@ -412,7 +412,7 @@ def demo_batch_parse():
     print()
     print("  按类型汇总:")
     for t, s in summary["by_type"].items():
-        print(f"    · {CYAN}{t:<20s}{RESET}  {s['ok']}✓ / {s['fail']}✗ / {s['total']}")
+        print(f"    - {CYAN}{t:<20s}{RESET}  {s['ok']}OK / {s['fail']}FAIL / {s['total']}")
 
 
 GREEN = "\033[32m"
