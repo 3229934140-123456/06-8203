@@ -354,6 +354,25 @@ class CronExpression:
             day_weekday_match,
         ])
 
+    @staticmethod
+    def _advance_day(dt: datetime, days: int = 1) -> datetime:
+        """安全地推进日期，自动处理跨月/跨年。"""
+        return (dt + timedelta(days=days)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+    @staticmethod
+    def _advance_hour(dt: datetime, hours: int = 1) -> datetime:
+        """安全地推进小时，自动处理跨天。"""
+        result = dt + timedelta(hours=hours)
+        return result.replace(minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def _advance_minute(dt: datetime, minutes: int = 1) -> datetime:
+        """安全地推进分钟，自动处理跨小时/跨天。"""
+        result = dt + timedelta(minutes=minutes)
+        return result.replace(second=0, microsecond=0)
+
     def next_trigger(
         self,
         base: Optional[datetime] = None,
@@ -364,18 +383,16 @@ class CronExpression:
 
         核心算法："逐字段向上搜索法"（Field-by-Field Advancement）
 
+        所有进位操作使用 timedelta，确保：
+        - 23:59:30 → 下一小时 = 次日 00:00:00（不会出现 hour=24 越界）
+        - 1月31日 → 下一天 = 2月1日（不会出现 day=32 越界）
+        - 12月31日 → 下一月 = 次年1月1日
+
         步骤：
         1. 从 base + 1秒开始（保证严格大于当前时刻）
-        2. 从大单位到小单位（年 -> 月 -> 日 -> 时 -> 分 -> 秒）依次检查：
-           a. 如果当前字段的值不在允许集合中，找到下一个允许值
-           b. 如果该字段还有更大的允许值，设置为该值，把后面所有更小的字段设为各自的最小值
-           c. 如果该字段没有更大的允许值，向上一个更大的字段进位，回到步骤2a
-        3. 所有字段都匹配时，检查日和周几的联合条件
-        4. 如果日或月发生变化，需要重新从更大的字段开始检查（因为日的可用值取决于月和年）
-
-        为什么要从大到小？
-        - 效率更高：大单位的变化次数少
-        - 例如搜索每月1号，不需要遍历每一天，只需要在月份变化时检查日
+        2. 从大单位到小单位（年 -> 月 -> 日 -> 时 -> 分 -> 秒）依次检查
+        3. 不匹配时：有下一个允许值就用它并清零低位；没有就用 timedelta 向上进位
+        4. 所有字段匹配且日/周几条件满足时返回
         """
         if base is None:
             base = datetime.now()
@@ -418,28 +435,7 @@ class CronExpression:
                 day_ok = False
 
             if not day_ok:
-                if candidate.day >= max_day:
-                    candidate = candidate.replace(
-                        day=1,
-                        hour=0,
-                        minute=0,
-                        second=0,
-                    )
-                    next_month = self.month.next_value(candidate.month)
-                    if next_month is not None:
-                        candidate = candidate.replace(month=next_month)
-                    else:
-                        candidate = candidate.replace(
-                            year=candidate.year + 1,
-                            month=self.month.first_value(),
-                        )
-                else:
-                    candidate = candidate.replace(
-                        day=candidate.day + 1,
-                        hour=0,
-                        minute=0,
-                        second=0,
-                    )
+                candidate = self._advance_day(candidate, 1)
                 continue
 
             if not (candidate.hour in self.hour):
@@ -451,12 +447,8 @@ class CronExpression:
                         second=0,
                     )
                 else:
-                    candidate = candidate.replace(
-                        day=candidate.day + 1,
-                        hour=self.hour.first_value(),
-                        minute=0,
-                        second=0,
-                    )
+                    candidate = self._advance_day(candidate, 1)
+                    candidate = candidate.replace(hour=self.hour.first_value())
                 continue
 
             if not (candidate.minute in self.minute):
@@ -467,11 +459,8 @@ class CronExpression:
                         second=0,
                     )
                 else:
-                    candidate = candidate.replace(
-                        hour=candidate.hour + 1,
-                        minute=self.minute.first_value(),
-                        second=0,
-                    )
+                    candidate = self._advance_hour(candidate, 1)
+                    candidate = candidate.replace(minute=self.minute.first_value())
                 continue
 
             if not (candidate.second in self.second):
@@ -479,10 +468,8 @@ class CronExpression:
                 if next_second is not None:
                     candidate = candidate.replace(second=next_second)
                 else:
-                    candidate = candidate.replace(
-                        minute=candidate.minute + 1,
-                        second=self.second.first_value(),
-                    )
+                    candidate = self._advance_minute(candidate, 1)
+                    candidate = candidate.replace(second=self.second.first_value())
                 continue
 
             return candidate

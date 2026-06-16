@@ -179,14 +179,42 @@ class TimezoneHandler:
 
     @classmethod
     def _get_gap_end_time(cls, naive_dt: datetime, tz_obj) -> datetime:
-        """获取 DST gap 结束后的第一个有效时间。"""
-        for hour in range(24):
-            candidate = naive_dt.replace(hour=hour, minute=0, second=0, microsecond=0)
-            if not cls._is_missing_time(candidate, tz_obj):
-                for minute in range(60):
-                    candidate2 = candidate.replace(minute=minute)
-                    if not cls._is_missing_time(candidate2, tz_obj):
-                        return candidate2.replace(tzinfo=tz_obj)
+        """
+        获取 DST gap 结束后的第一个有效本地时间。
+
+        实现原理（检测跳变法）：
+        1. 从 naive_dt 当天 00:00 开始，以 UTC 每分钟递增
+        2. 记录前一个 UTC 对应的本地时间 prev_local
+        3. 当 (current_local - prev_local) > 1 分钟时，发生了 Spring Forward 跳变
+        4. current_local 就是 gap 后的第一个有效本地时间
+
+        例：纽约 2024-03-10 02:30
+        - UTC 06:59 → 本地 01:59 (DST前, UTC-5)
+        - UTC 07:00 → 本地 03:00 (DST后, UTC-4)
+        - 差 61 分钟 > 1 分钟，跳变！返回 03:00
+        """
+        day_start = naive_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start_tz = day_start.replace(fold=0, tzinfo=tz_obj)
+        utc_cursor = day_start_tz.astimezone(tz.utc)
+
+        prev_local = None
+        for _ in range(1440):
+            local_cursor = utc_cursor.astimezone(tz_obj)
+            local_naive = local_cursor.replace(tzinfo=None)
+
+            if prev_local is not None:
+                diff_minutes = (local_naive - prev_local).total_seconds() / 60
+                if diff_minutes > 1.5:
+                    if local_naive >= naive_dt or (
+                        naive_dt >= prev_local and naive_dt < local_naive
+                    ):
+                        return local_naive.replace(tzinfo=tz_obj).replace(
+                            second=0, microsecond=0
+                        )
+
+            prev_local = local_naive
+            utc_cursor += timedelta(minutes=1)
+
         return naive_dt.replace(tzinfo=tz_obj)
 
     @classmethod
