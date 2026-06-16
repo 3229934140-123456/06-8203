@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from calendar_utils import CalendarArithmetic
 
@@ -17,18 +17,14 @@ class CronField:
     - second (秒):     0-59
     - minute (分):     0-59
     - hour (时):       0-23
-    - day (日):        1-31
+    - day (日):        1-31    [高级语法: L (月末), NW (最近N号的工作日)]
     - month (月):      1-12
-    - weekday (周几):  0-6 (0=周日, 或 1-7 其中7=周日)
+    - weekday (周几):  0-6     [高级语法: N#M (本月第M个周N), L (最后一个周几)]
 
-    支持的语法：
-    - *        : 匹配所有值
-    - ?        : 不指定（仅日和周几字段，表示不关心）
-    - N        : 具体值，如 5
-    - N-M      : 范围，如 1-5
-    - N,M,K    : 枚举列表，如 1,3,5
-    - */N      : 步长，从最小值开始每 N 个，如 */5
-    - N-M/S    : 在范围内按步长，如 10-30/5
+    支持的高级语法：
+    - L        : 月末 (day 字段)，或"最后一个周N" (weekday 字段，如 "6L"=最后一个周六)
+    - NW       : 最接近 N 号的工作日 (day 字段，如 "15W"，避开周末)
+    - N#M      : 本月第 M 个周 N (weekday 字段，如 "1#3"=第3个周一, "MON#2"=第2个周一)
     """
 
     name: str
@@ -37,6 +33,14 @@ class CronField:
     values: Set[int] = field(default_factory=set)
     any: bool = False
     unspecified: bool = False
+
+    # day 字段高级语法
+    last_day: bool = False
+    nearest_workday_to: Optional[int] = None
+
+    # weekday 字段高级语法: [(weekday, nth_in_month)]  # nth=None 表示"最后一个"
+    nth_weekdays: List[Tuple[int, Optional[int]]] = field(default_factory=list)
+    weekday_last: Set[int] = field(default_factory=set)
 
     MONTH_NAMES = {
         "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
@@ -57,6 +61,11 @@ class CronField:
     ) -> "CronField":
         """解析单个 cron 字段。"""
         values: Set[int] = set()
+        last_day = False
+        nearest_workday_to: Optional[int] = None
+        nth_weekdays: List[Tuple[int, Optional[int]]] = []
+        weekday_last: Set[int] = set()
+
         expr = expr.strip().upper()
 
         if expr == "*":
@@ -77,7 +86,7 @@ class CronField:
                 unspecified=True,
             )
 
-        name_map = {}
+        name_map: Dict[str, int] = {}
         if name == "month":
             name_map = cls.MONTH_NAMES
         elif name == "weekday":
@@ -85,7 +94,53 @@ class CronField:
 
         parts = expr.split(",")
         for part in parts:
+            if name == "day" and part == "L":
+                last_day = True
+                continue
+
+            if name == "day" and part.endswith("W"):
+                day_num_str = part[:-1]
+                if day_num_str.isdigit():
+                    nearest_workday_to = int(day_num_str)
+                    if not (1 <= nearest_workday_to <= 31):
+                        raise ValueError(f"工作日锚点超出范围: {part}")
+                    continue
+                raise ValueError(f"无法解析工作日表达式: {part}")
+
+            if name == "weekday" and "#" in part:
+                wd_str, nth_str = part.split("#", 1)
+                wd = cls._resolve_value(wd_str, name_map)
+                if wd == 7:
+                    wd = 0
+                if not (0 <= wd <= 6):
+                    raise ValueError(f"周几超出范围: {wd_str}")
+                if not nth_str.isdigit():
+                    raise ValueError(f"第几个周几必须是数字: {nth_str}")
+                nth = int(nth_str)
+                if not (1 <= nth <= 5):
+                    raise ValueError(f"第几个周几必须在 1-5 之间: {nth}")
+                nth_weekdays.append((wd, nth))
+                continue
+
+            if name == "weekday" and part.endswith("L"):
+                wd_str = part[:-1]
+                wd = cls._resolve_value(wd_str, name_map) if wd_str else None
+                if wd is None:
+                    continue
+                if wd == 7:
+                    wd = 0
+                weekday_last.add(wd)
+                continue
+
             values.update(cls._parse_part(part, min_value, max_value, name_map))
+
+        if name == "day" and (last_day or nearest_workday_to is not None):
+            if not values:
+                values = set(range(1, 32))
+
+        if name == "weekday" and (nth_weekdays or weekday_last):
+            if not values:
+                values = set(range(0, 7))
 
         if not values:
             raise ValueError(f"字段 {name} 没有匹配的值: {expr}")
@@ -101,6 +156,10 @@ class CronField:
             min_value=min_value,
             max_value=max_value,
             values=values,
+            last_day=last_day,
+            nearest_workday_to=nearest_workday_to,
+            nth_weekdays=nth_weekdays,
+            weekday_last=weekday_last,
         )
 
     @staticmethod
@@ -133,12 +192,21 @@ class CronField:
                 end = max_value
             else:
                 val = CronField._resolve_value(range_part, name_map)
+                if val == 7 and CronField._try_is_weekday(name_map):
+                    return {0}
                 return {val}
 
         for v in range(start, end + 1, step):
-            result.add(v)
+            if v == 7 and CronField._try_is_weekday(name_map):
+                result.add(0)
+            else:
+                result.add(v)
 
         return result
+
+    @staticmethod
+    def _try_is_weekday(name_map: dict) -> bool:
+        return 0 in name_map.values() and 1 in name_map.values()
 
     @staticmethod
     def _resolve_value(val_str: str, name_map: dict) -> int:
@@ -273,35 +341,34 @@ class CronExpression:
         - Unix Cron 使用 0-6，0=周日
         - Quartz 使用 1-7，7=周日，1=周一
         本实现统一转换为 0-6，0=周日
+        同时保留高级语法标记：#N (第N个)、L (最后一个)
         """
         result = []
         for part in token.split(","):
+            # 处理 MON#3 / 2#3 (第N个周几)
+            if "#" in part:
+                base, nth = part.split("#", 1)
+                base_norm = CronExpression._normalize_single_weekday_val(base)
+                result.append(f"{base_norm}#{nth}")
+                continue
+            # 处理 MONL / 6L (最后一个周几)
+            if part.upper().endswith("L"):
+                base = part[:-1]
+                base_norm = CronExpression._normalize_single_weekday_val(base) if base else base
+                result.append(f"{base_norm}L")
+                continue
+            # 处理 */step 和 普通范围
             dash_parts = part.split("/")
             range_expr = dash_parts[0]
 
-            def convert_val(v: str) -> str:
-                v = v.strip().upper()
-                if v in CronField.WEEKDAY_NAMES:
-                    return str(CronField.WEEKDAY_NAMES[v])
-                if v in ("*", "?"):
-                    return v
-                try:
-                    n = int(v)
-                    if n == 7:
-                        return "0"
-                    if 0 <= n <= 6:
-                        return str(n)
-                    if 1 <= n <= 7:
-                        return str(n - 1)
-                    return v
-                except ValueError:
-                    return v
-
             if "-" in range_expr:
                 r_start, r_end = range_expr.split("-", 1)
-                range_expr = f"{convert_val(r_start)}-{convert_val(r_end)}"
+                range_expr = (
+                    f"{CronExpression._normalize_single_weekday_val(r_start)}-"
+                    f"{CronExpression._normalize_single_weekday_val(r_end)}"
+                )
             else:
-                range_expr = convert_val(range_expr)
+                range_expr = CronExpression._normalize_single_weekday_val(range_expr)
 
             if len(dash_parts) > 1:
                 result.append(f"{range_expr}/{dash_parts[1]}")
@@ -310,41 +377,172 @@ class CronExpression:
 
         return ",".join(result)
 
-    def _day_weekday_match(self, day: int, weekday: int) -> bool:
+    @staticmethod
+    def _normalize_single_weekday_val(v: str) -> str:
+        v = v.strip().upper()
+        if v in CronField.WEEKDAY_NAMES:
+            return str(CronField.WEEKDAY_NAMES[v])
+        if v in ("*", "?"):
+            return v
+        try:
+            n = int(v)
+            if n == 7:
+                return "0"
+            if 0 <= n <= 6:
+                return str(n)
+            if 1 <= n <= 7:
+                return str(n - 1)
+            return v
+        except ValueError:
+            return v
+
+    # ============================================================
+    # 高级语法辅助方法
+    # ============================================================
+
+    @staticmethod
+    def _nth_weekday_in_month(year: int, month: int, weekday: int, nth: int) -> Optional[int]:
+        """
+        计算 (year, month) 中第 nth 个 weekday 的日期（1..31），不存在返回 None。
+        weekday: 0=周日 .. 6=周六；nth: 1..5
+        """
+        first = datetime(year, month, 1)
+        first_wd = (first.weekday() + 1) % 7  # Python 的 weekday() 0=周一，统一转为 0=周日
+        delta = (weekday - first_wd + 7) % 7
+        first_occurrence = 1 + delta
+        target_day = first_occurrence + (nth - 1) * 7
+        max_day = CalendarArithmetic.days_in_month(year, month)
+        return target_day if target_day <= max_day else None
+
+    @staticmethod
+    def _last_weekday_in_month(year: int, month: int, weekday: int) -> int:
+        """返回 (year, month) 中最后一个 weekday 的日期。"""
+        last_day = CalendarArithmetic.days_in_month(year, month)
+        last_dt = datetime(year, month, last_day)
+        last_wd = (last_dt.weekday() + 1) % 7
+        delta = (last_wd - weekday + 7) % 7
+        return last_day - delta
+
+    @staticmethod
+    def _nearest_workday(year: int, month: int, day: int) -> int:
+        """
+        计算最接近 day 号的工作日（周一至周五）。
+        规则：
+          - day 本身是工作日 (0..4 对应周一到周五)，返回 day
+          - 若为周六，返回 day-1（周五）
+          - 若为周日，返回 day+1（周一）
+          - 若 day-1 / day+1 跨月，则取最近的非周末
+        """
+        max_day = CalendarArithmetic.days_in_month(year, month)
+        dt = datetime(year, month, min(max(day, 1), max_day))
+        py_wd = dt.weekday()  # 0=周一 .. 5=周六 .. 6=周日
+        if py_wd <= 4:
+            return dt.day
+        if py_wd == 5:  # 周六 -> 周五
+            return dt.day - 1 if dt.day > 1 else dt.day + 2
+        # 周日 -> 周一
+        return dt.day + 1 if dt.day < max_day else dt.day - 2
+
+    # ============================================================
+    # 匹配逻辑
+    # ============================================================
+
+    def _evaluate_day_advanced(self, dt: datetime) -> bool:
+        """计算 day 字段的高级语法匹配 (L / NW)。"""
+        f = self.day
+        if not f.last_day and f.nearest_workday_to is None:
+            return True
+
+        if f.last_day and dt.day != CalendarArithmetic.days_in_month(dt.year, dt.month):
+            return False
+
+        if f.nearest_workday_to is not None:
+            expected = self._nearest_workday(dt.year, dt.month, f.nearest_workday_to)
+            if dt.day != expected:
+                return False
+
+        return True
+
+    def _evaluate_weekday_advanced(self, dt: datetime, weekday: int) -> bool:
+        """计算 weekday 字段的高级语法匹配 (#N / NL)。"""
+        f = self.weekday
+        if not f.nth_weekdays and not f.weekday_last:
+            return True
+
+        matched = False
+
+        # #N: 第 N 个周几
+        for (target_wd, nth) in f.nth_weekdays:
+            if weekday != target_wd:
+                continue
+            expected_day = self._nth_weekday_in_month(dt.year, dt.month, target_wd, nth or 1)
+            if expected_day is not None and dt.day == expected_day:
+                matched = True
+                break
+
+        # NL: 最后一个周几
+        if not matched and f.weekday_last:
+            for target_wd in f.weekday_last:
+                if weekday != target_wd:
+                    continue
+                expected_day = self._last_weekday_in_month(dt.year, dt.month, target_wd)
+                if dt.day == expected_day:
+                    matched = True
+                    break
+
+        return matched
+
+    def _day_weekday_match(self, dt: datetime) -> bool:
         """
         日和周几的联合匹配逻辑。
 
-        Quartz Cron 规则：
-        - 若 day 或 weekday 其中一个是 ?（unspecified）或 *（any），另一个指定具体值，
-          则只需匹配那个指定具体值的（AND 逻辑的退化 - 因为另一个是全匹配）。
-        - 若两者都指定了具体值（非 * 非 ?），则 OR 匹配（任一满足即可）。
-        - 若两者都是 ? 或 *，则都匹配。
+        Quartz Cron 规则（考虑高级语法 L / W / #N / NL）：
+        - 如果 日/周几 存在高级语法，则必须通过高级语法检测 + 常规值匹配
+        - 若 day 或 weekday 其中一个未指定（?/*），另一个指定具体值，则按指定的匹配
+        - 若两者都指定了具体值（含高级语法），则 OR 匹配（任一满足即可）。
         """
-        day_is_specific = not self.day.any and not self.day.unspecified
-        weekday_is_specific = not self.weekday.any and not self.weekday.unspecified
+        weekday = (dt.weekday() + 1) % 7
 
-        day_match = day in self.day
-        weekday_match = weekday in self.weekday
+        day_has_advanced = self.day.last_day or self.day.nearest_workday_to is not None
+        wd_has_advanced = bool(self.weekday.nth_weekdays or self.weekday.weekday_last)
+
+        day_is_specific = (not self.day.any and not self.day.unspecified) or day_has_advanced
+        weekday_is_specific = (not self.weekday.any and not self.weekday.unspecified) or wd_has_advanced
+
+        # 常规值匹配
+        day_match_basic = dt.day in self.day
+        wd_match_basic = weekday in self.weekday
+
+        # 高级语法匹配（不开启则视为 True，即不影响）
+        day_match_adv = self._evaluate_day_advanced(dt)
+        wd_match_adv = self._evaluate_weekday_advanced(dt, weekday)
+
+        # 最终 day / weekday 匹配 = 基础 AND 高级
+        day_match = day_match_basic and day_match_adv
+        wd_match = wd_match_basic and wd_match_adv
+
+        if not day_has_advanced:
+            day_match = day_match_basic
+        if not wd_has_advanced:
+            wd_match = wd_match_basic
 
         if day_is_specific and weekday_is_specific:
-            return day_match or weekday_match
+            return day_match or wd_match
         elif day_is_specific:
             return day_match
         elif weekday_is_specific:
-            return weekday_match
+            return wd_match
         else:
-            return day_match and weekday_match
+            return day_match and wd_match
 
     def matches(self, dt: datetime) -> bool:
         """判断给定时间是否匹配此 Cron 表达式。"""
-        weekday = (dt.weekday() + 1) % 7
-
         month_match = dt.month in self.month
         hour_match = dt.hour in self.hour
         minute_match = dt.minute in self.minute
         second_match = dt.second in self.second
 
-        day_weekday_match = self._day_weekday_match(dt.day, weekday)
+        day_weekday_match = self._day_weekday_match(dt)
 
         return all([
             month_match,
@@ -428,9 +626,7 @@ class CronExpression:
             max_day = CalendarArithmetic.days_in_month(candidate.year, candidate.month)
             valid_days = {d for d in self.day.values if 1 <= d <= max_day}
 
-            weekday = (candidate.weekday() + 1) % 7
-
-            day_ok = self._day_weekday_match(candidate.day, weekday)
+            day_ok = self._day_weekday_match(candidate)
             if candidate.day not in valid_days:
                 day_ok = False
 

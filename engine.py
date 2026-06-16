@@ -1,13 +1,44 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone as tz
-from typing import Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from calendar_utils import CalendarArithmetic
 from duration import ISODuration
 from relative_time import RelativeTimeParser
-from cron_parser import CronExpression
+from cron_parser import CronExpression, CronField
 from timezone_utils import TimezoneHandler
+
+
+EXPRESSION_TYPE_RELATIVE = "relative_time"
+EXPRESSION_TYPE_CRON = "cron"
+EXPRESSION_TYPE_ISO_DURATION = "iso_duration"
+EXPRESSION_TYPE_ISO_DATETIME = "iso_datetime"
+EXPRESSION_TYPE_ZONED_DATETIME = "zoned_datetime"
+EXPRESSION_TYPE_UNKNOWN = "unknown"
+
+
+@dataclass
+class ParseResult:
+    """单条表达式的解析结果。"""
+
+    raw: str
+    type: str = EXPRESSION_TYPE_UNKNOWN
+    ok: bool = False
+    result: Any = None
+    error: Optional[str] = None
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "raw": self.raw,
+            "type": self.type,
+            "ok": self.ok,
+            "result": self.result,
+            "error": self.error,
+            "meta": self.meta,
+        }
 
 
 class TimeExpressionEngine:
@@ -276,5 +307,173 @@ class TimeExpressionEngine:
 
         return self.parse_relative_time(stripped, base)
 
+    # ------------------------------------------------------------------
+    # 批量解析入口
+    # ------------------------------------------------------------------
 
-from cron_parser import CronField
+    def _detect_type(self, expr: str) -> str:
+        stripped = expr.strip()
+
+        if " " in stripped and len(stripped.split()) in (5, 6):
+            parts = stripped.split()
+            hint = parts[0].upper()
+            if (
+                parts[0] in ("*", "?")
+                or parts[0][0].isdigit()
+                or hint in CronField.MONTH_NAMES
+                or hint in CronField.WEEKDAY_NAMES
+                or "/" in parts[0]
+                or "-" in parts[0]
+                or "," in parts[0]
+            ):
+                return EXPRESSION_TYPE_CRON
+
+        if stripped.startswith("P"):
+            return EXPRESSION_TYPE_ISO_DURATION
+
+        if "T" in stripped or stripped.count("-") >= 2:
+            if stripped.endswith("Z") or stripped.endswith("UTC") or (
+                "+" in stripped[10:] and "T" in stripped
+            ) or (stripped[10:].count("-") == 1 and "T" in stripped):
+                return EXPRESSION_TYPE_ZONED_DATETIME
+            if stripped.count("-") >= 2 or "T" in stripped:
+                return EXPRESSION_TYPE_ISO_DATETIME
+
+        return EXPRESSION_TYPE_RELATIVE
+
+    def parse_many(
+        self,
+        expressions: List[Union[str, Dict[str, Any]]],
+        base: Optional[datetime] = None,
+        tz_name: Optional[str] = None,
+        fold: int = 0,
+        gap_strategy: str = "forward",
+    ) -> List[ParseResult]:
+        """
+        统一批量解析入口。
+
+        每条表达式可以是：
+          1. 纯字符串：自动识别类型
+          2. dict：{'expr': str, 'type': str?, 'base': datetime?, 'tz': str?, ...}
+             可选覆盖全局参数 base/tz_name/fold/gap_strategy
+
+        类型取值 (type / ParseResult.type)：
+          - relative_time    : 中文相对时间（"3天后"、"下周一中午12点"）
+          - cron             : Cron 表达式，解析为 next_trigger 结果
+          - iso_duration     : ISO 8601 间隔，应用到基准时间的结果
+          - iso_datetime     : 不带时区的 ISO 格式绝对时间（YYYY-MM-DDTHH:MM:SS）
+          - zoned_datetime   : 带 Z/UTC/+HH:MM/-HH:MM 的绝对时间
+          - unknown          : 无法识别类型
+
+        返回每条：ParseResult(raw, type, ok, result, error, meta)
+        """
+        if base is None:
+            base = self._now_with_tz()
+
+        results: List[ParseResult] = []
+        for idx, item in enumerate(expressions):
+            meta: Dict[str, Any] = {"index": idx}
+            if isinstance(item, str):
+                raw = item
+                force_type = None
+                item_base = base
+                item_tz = tz_name
+                item_fold = fold
+                item_gap = gap_strategy
+            elif isinstance(item, dict):
+                raw = item.get("expr") or item.get("expression") or ""
+                force_type = item.get("type")
+                item_base = item.get("base", base)
+                item_tz = item.get("tz", tz_name)
+                item_fold = item.get("fold", fold)
+                item_gap = item.get("gap_strategy", gap_strategy)
+                if "cron_base" in item:
+                    meta["cron_base"] = str(item["cron_base"])
+            else:
+                r = ParseResult(raw=str(item), error=f"不支持的输入类型: {type(item)}")
+                results.append(r)
+                continue
+
+            r = ParseResult(raw=raw, meta=meta)
+            r.type = force_type or self._detect_type(raw)
+            try:
+                self._dispatch_one(r, item_base, item_tz, item_fold, item_gap)
+            except Exception as e:
+                r.error = f"{type(e).__name__}: {e}"
+                r.ok = False
+            results.append(r)
+        return results
+
+    def _dispatch_one(
+        self,
+        r: ParseResult,
+        base: datetime,
+        tz_name: Optional[str],
+        fold: int,
+        gap_strategy: str,
+    ):
+        stripped = r.raw.strip()
+
+        if r.type == EXPRESSION_TYPE_CRON:
+            try:
+                parsed = CronExpression.parse(stripped)
+                r.result = parsed.next_trigger(base)
+                r.meta["cron_fields"] = str(parsed)
+                r.ok = True
+            except Exception as e:
+                r.error = f"{type(e).__name__}: {e}"
+            return
+
+        if r.type == EXPRESSION_TYPE_ISO_DURATION:
+            try:
+                dur = ISODuration.parse(stripped)
+                r.result = dur.apply_to(base)
+                r.meta["duration"] = {
+                    "years": dur.years, "months": dur.months,
+                    "weeks": dur.weeks, "days": dur.days,
+                    "hours": dur.hours, "minutes": dur.minutes,
+                    "seconds": dur.seconds,
+                }
+                r.ok = True
+            except Exception as e:
+                r.error = f"{type(e).__name__}: {e}"
+            return
+
+        if r.type in (EXPRESSION_TYPE_ISO_DATETIME, EXPRESSION_TYPE_ZONED_DATETIME):
+            try:
+                dt = datetime.fromisoformat(stripped)
+                if r.type == EXPRESSION_TYPE_ZONED_DATETIME:
+                    r.result = dt
+                    r.ok = True
+                    return
+                if dt.tzinfo is None and tz_name:
+                    localized = TimezoneHandler.localize(dt, tz_name, fold, gap_strategy)
+                    r.result = localized
+                    r.meta["timezone"] = tz_name
+                else:
+                    r.result = dt
+                r.ok = True
+            except Exception as e:
+                r.error = f"{type(e).__name__}: {e}"
+            return
+
+        # relative_time / unknown fallback
+        try:
+            r.result = RelativeTimeParser.parse(stripped, base)
+            if r.type == EXPRESSION_TYPE_UNKNOWN:
+                r.type = EXPRESSION_TYPE_RELATIVE
+            r.ok = True
+        except Exception as e:
+            r.error = f"{type(e).__name__}: {e}"
+
+    @staticmethod
+    def summarize(results: List[ParseResult]) -> Dict[str, Any]:
+        """汇总批量解析结果，输出总览统计。"""
+        total = len(results)
+        passed = sum(1 for r in results if r.ok)
+        by_type: Dict[str, Dict[str, int]] = {}
+        for r in results:
+            bucket = by_type.setdefault(r.type, {"ok": 0, "fail": 0, "total": 0})
+            bucket["total"] += 1
+            bucket["ok" if r.ok else "fail"] += 1
+        return {"total": total, "ok": passed, "fail": total - passed, "by_type": by_type}

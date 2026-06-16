@@ -306,6 +306,121 @@ def demo_concept_explanation():
 """)
 
 
+def demo_cron_advanced():
+    """Cron 高级语法演示：L / W / #N / NL"""
+    section("六、Cron 高级语法（月末/工作日/第N个周几）")
+    NY = "America/New_York"
+    base = datetime(2024, 6, 1, 0, 0, 0)
+
+    cases = [
+        ("0 0 0 L * ?",          "每月最后一天零点"),
+        ("0 0 12 L * ?",         "每月最后一天中午12点"),
+        ("0 30 9 15W * ?",       "最接近15号的工作日上午9:30"),
+        ("0 0 9 1W * ?",         "每月最接近1号的工作日早9点"),
+        ("0 0 0 ? * MON#3",      "每月第3个周一零点"),
+        ("0 0 10 ? * FRI#5",     "每月第5个周五上午10点 (若当月有)"),
+        ("0 0 0 ? * MONL",       "每月最后一个周一零点"),
+        ("0 0 0 ? * FRIL",       "每月最后一个周五零点"),
+    ]
+    for expr, desc in cases:
+        try:
+            next_t = CronExpression.parse(expr).next_trigger(base)
+            print(f"  {desc:<30s}  [{expr:<22s}]  →  {next_t.strftime('%Y-%m-%d %A %H:%M:%S')}")
+        except Exception as e:
+            print(f"  {desc:<30s}  [{expr:<22s}]  →  ERROR: {e}")
+
+
+def demo_timezone_diagnosis():
+    """时区本地化 + DST 完整诊断输出"""
+    section("七、时区本地化 + 夏令时诊断")
+    NY = "America/New_York"
+    H = TimezoneHandler()
+    cases = [
+        (datetime(2024, 3, 10, 1, 59, 59), 0, "forward", "DST 切换前 1ms"),
+        (datetime(2024, 3, 10, 2, 0, 0),    0, "forward", "DST gap 起始"),
+        (datetime(2024, 3, 10, 2, 30, 0),   0, "forward", "DST gap 中间 forward"),
+        (datetime(2024, 3, 10, 2, 30, 0),   0, "shift",   "DST gap 中间 shift"),
+        (datetime(2024, 3, 10, 2, 59, 59),  0, "forward", "DST gap 结束前"),
+        (datetime(2024, 3, 10, 3, 0, 1),    0, "forward", "DST gap 之后"),
+        (datetime(2024, 11, 3, 0, 59, 59),  0, "forward", "Fall Back 前"),
+        (datetime(2024, 11, 3, 1, 30, 0),   0, "forward", "Fall Back ambiguous fold=0"),
+        (datetime(2024, 11, 3, 1, 30, 0),   1, "forward", "Fall Back ambiguous fold=1"),
+        (datetime(2024, 11, 3, 2, 0, 1),    0, "forward", "Fall Back 之后"),
+    ]
+    print(f"  {'场景说明':<28s} {'原始时间':<20s} → 结果时间       dst_status   gap/fold    调整  is_dst")
+    print(f"  {'─' * 108}")
+    for naive, fold, strat, desc in cases:
+        try:
+            r = H.localize_with_diagnosis(naive, NY, fold=fold, gap_strategy=strat)
+            line = (
+                f"  {desc:<28s} "
+                f"{r.original_local.strftime('%m-%d %H:%M:%S'):<20s} "
+                f"→ {r.datetime.strftime('%m-%d %H:%M:%S%z'):<22s} "
+                f"{r.dst_status:<12s} "
+                f"{(r.gap_applied or (f'fold={r.fold_used}' if r.fold_used is not None else '—')):<11s} "
+                f"{r.adjustment_minutes:+3d}分 "
+                f"{r.meta.get('is_dst')}"
+            )
+            print(line)
+        except Exception as e:
+            print(f"  {desc:<28s} ERROR: {e}")
+
+
+def demo_batch_parse():
+    """批量解析入口 parse_many 演示"""
+    section("八、批量解析入口 parse_many (统一集成入口)")
+    NY = "America/New_York"
+    engine = TimeExpressionEngine()
+    base = datetime(2024, 6, 17, 12, 0, 0)
+
+    expressions = [
+        "3天后",
+        "下周一中午12点",
+        "0 0 0 L * ?",
+        "0 0 9 15W * ?",
+        "0 0 0 ? * MON#3",
+        "P1Y2M3D",
+        "P-1D",
+        {"expr": "2024-03-10T02:30:00", "tz": NY, "gap_strategy": "forward",
+         "type": "iso_datetime"},
+        {"expr": "2024-03-10T02:30:00", "tz": NY, "gap_strategy": "shift",
+         "type": "iso_datetime"},
+        "2024-06-17T18:00:00+08:00",
+        {"expr": "0 0 * * * invalid!!!", "type": "cron"},
+    ]
+    results = engine.parse_many(expressions, base=base, tz_name=NY)
+    summary = engine.summarize(results)
+
+    print(f"  共 {summary['total']} 条  "
+          f"{summary['ok']} PASS,  {summary['fail']} FAIL")
+    print()
+    for i, r in enumerate(results):
+        flag = f"{GREEN}OK{RESET}" if r.ok else f"{RED}NG{RESET}"
+        extra = ""
+        if r.error:
+            extra = f"  {RED}err={r.error[:50]}{RESET}"
+        if r.type == "iso_datetime" and r.ok:
+            extra = f"  本地化后={r.result.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        if r.type == "cron" and r.ok:
+            extra = f"  下次触发={r.result.strftime('%Y-%m-%d %H:%M:%S')}"
+        print(
+            f"  [{i:>2}] {flag}  "
+            f"type={CYAN}{r.type:<16s}{RESET}  "
+            f"raw={r.raw:<35s}"
+            f"{extra}"
+        )
+    print()
+    print("  按类型汇总:")
+    for t, s in summary["by_type"].items():
+        print(f"    · {CYAN}{t:<20s}{RESET}  {s['ok']}✓ / {s['fail']}✗ / {s['total']}")
+
+
+GREEN = "\033[32m"
+RED = "\033[31m"
+CYAN = "\033[36m"
+RESET = "\033[0m"
+
+
 def main():
     print("\n" + "#" * 70)
     print("#" + " " * 68 + "#")
@@ -342,6 +457,21 @@ def main():
         demo_engine()
     except Exception as e:
         print(f"统一引擎演示出错: {e}")
+
+    try:
+        demo_cron_advanced()
+    except Exception as e:
+        print(f"Cron 高级语法演示出错: {e}")
+
+    try:
+        demo_timezone_diagnosis()
+    except Exception as e:
+        print(f"时区诊断演示出错: {e}")
+
+    try:
+        demo_batch_parse()
+    except Exception as e:
+        print(f"批量解析演示出错: {e}")
 
     demo_concept_explanation()
 

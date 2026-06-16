@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone as tz
-from typing import Optional, Union
+from typing import Any, Dict, Optional, Union
 
 try:
     from zoneinfo import ZoneInfo, available_timezones
@@ -14,6 +15,59 @@ except ImportError:
         HAS_ZONEINFO = False
         ZoneInfo = None
         available_timezones = None
+
+
+DST_STATUS_NORMAL = "normal"
+DST_STATUS_GAP = "gap"
+DST_STATUS_AMBIGUOUS = "ambiguous"
+
+GAP_STRATEGY_FORWARD = "forward"
+GAP_STRATEGY_SHIFT = "shift"
+GAP_STRATEGY_RAISE = "raise"
+
+
+@dataclass
+class LocalizeResult:
+    """
+    时区本地化的完整诊断结果。
+
+    属性:
+        datetime:          最终的时区感知时间
+        is_missing:        原始本地时间在该时区中是否不存在（Spring Forward gap）
+        is_ambiguous:      原始本地时间在该时区中是否重复（Fall Back ambiguity）
+        dst_status:        "normal" / "gap" / "ambiguous"
+        gap_applied:       若在 gap 中，采用了哪种调整策略: "forward"/"shift"；否则 None
+        fold_used:         若 ambiguous，使用的 fold 值 (0/1)；否则 None
+        original_local:    原始输入的本地时间（naive）
+        timezone:          目标时区名
+        adjustment_minutes:最终结果相对于原始本地时间的正向或负向调整分钟数（可用于日志）
+        meta:              额外信息（如 UTC 偏移、是否 DST 等）
+    """
+
+    datetime: datetime
+    is_missing: bool = False
+    is_ambiguous: bool = False
+    dst_status: str = DST_STATUS_NORMAL
+    gap_applied: Optional[str] = None
+    fold_used: Optional[int] = None
+    original_local: Optional[datetime] = None
+    timezone: str = ""
+    adjustment_minutes: int = 0
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "datetime": self.datetime,
+            "is_missing": self.is_missing,
+            "is_ambiguous": self.is_ambiguous,
+            "dst_status": self.dst_status,
+            "gap_applied": self.gap_applied,
+            "fold_used": self.fold_used,
+            "original_local": self.original_local,
+            "timezone": self.timezone,
+            "adjustment_minutes": self.adjustment_minutes,
+            "meta": self.meta,
+        }
 
 
 class TimezoneHandler:
@@ -138,6 +192,76 @@ class TimezoneHandler:
                 aware_dt = cls._get_gap_end_time(naive_dt, tz_obj)
 
         return aware_dt
+
+    @classmethod
+    def localize_with_diagnosis(
+        cls,
+        naive_dt: datetime,
+        tz_name: str,
+        fold: int = FOLD_FIRST,
+        gap_strategy: str = "forward",
+    ) -> LocalizeResult:
+        """
+        本地化 + 返回完整诊断信息。
+
+        返回 LocalizeResult：
+        - dst_status: "gap" / "ambiguous" / "normal"
+        - gap_applied: 当 dst_status="gap" 时，实际使用的策略 ("forward"/"shift")
+        - fold_used : 当 dst_status="ambiguous" 时，实际使用的 fold (0/1)
+        - adjustment_minutes: 结果相对原始本地时间的偏移(分钟)
+        """
+        if naive_dt.tzinfo is not None:
+            raise ValueError("naive_dt 必须是不带时区的 datetime")
+
+        tz_obj = ZoneInfo(tz_name)
+
+        missing = cls._is_missing_time(naive_dt, tz_obj)
+        ambiguous = (not missing) and cls._is_ambiguous_time(naive_dt, tz_obj)
+
+        aware_dt: datetime
+        applied_gap: Optional[str] = None
+
+        if missing:
+            if gap_strategy == "raise":
+                raise ValueError(
+                    f"时间 {naive_dt} 在时区 {tz_name} 中不存在（夏令时前调）"
+                )
+            applied_gap = gap_strategy
+            if gap_strategy == "shift":
+                utc_offset_before = cls._get_utc_offset_before_gap(naive_dt, tz_obj)
+                utc_offset_after = cls._get_utc_offset_after_gap(naive_dt, tz_obj)
+                shift = utc_offset_after - utc_offset_before
+                aware_dt = (naive_dt + shift).replace(tzinfo=tz_obj)
+            else:
+                aware_dt = cls._get_gap_end_time(naive_dt, tz_obj)
+        else:
+            aware_dt = naive_dt.replace(fold=fold, tzinfo=tz_obj)
+
+        offset = aware_dt.utcoffset() or timedelta(0)
+        dst_flag = aware_dt.dst()
+        adjustment = int(
+            (aware_dt.replace(tzinfo=None) - naive_dt).total_seconds() // 60
+        )
+
+        status = DST_STATUS_GAP if missing else (
+            DST_STATUS_AMBIGUOUS if ambiguous else DST_STATUS_NORMAL
+        )
+
+        return LocalizeResult(
+            datetime=aware_dt,
+            is_missing=missing,
+            is_ambiguous=ambiguous,
+            dst_status=status,
+            gap_applied=applied_gap,
+            fold_used=fold if ambiguous else None,
+            original_local=naive_dt,
+            timezone=tz_name,
+            adjustment_minutes=adjustment,
+            meta={
+                "utc_offset": offset,
+                "is_dst": dst_flag is not None and dst_flag != timedelta(0),
+            },
+        )
 
     @classmethod
     def _is_missing_time(cls, naive_dt: datetime, tz_obj) -> bool:
