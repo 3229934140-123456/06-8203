@@ -679,32 +679,43 @@ class CronExpression:
         n: int,
         base: Optional[datetime] = None,
         max_span: Optional[timedelta] = None,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
     ) -> List[datetime]:
         """
         获取接下来 n 个触发时间。
 
         参数:
-            n:        需要的触发次数
-            base:     起始基准时间（不含自身）
+            n:        最多返回条数
+            base:     起始基准时间（不含自身），优先级低于 start
             max_span: 最大查找跨度（如 timedelta(days=365)）。
                       超出跨度的后续触发不再计算，直接返回已找到的。
                       防止 "2月29日" 这种极稀疏规则搜索过久。
+            start:    查找范围的起始时间（含，不含自身）。
+                      若提供则覆盖 base。
+            end:      查找范围的截止时间（不含）。
+                      超出此时间的触发不会返回，且搜索立即停止。
+                      适合 "列出 2024 年内的所有触发" 这类窗口查询。
 
         返回:
-            触发时间列表，长度 <= n（当触达 max_span 时可能少于 n）
+            触发时间列表，长度 <= n（当触达 max_span 或 end 时可能少于 n）
         """
-        if base is None:
-            base = datetime.now()
+        effective_base = start if start is not None else base
+        if effective_base is None:
+            effective_base = datetime.now()
 
         deadline = None
         if max_span is not None:
-            deadline = base + max_span
+            deadline = effective_base + max_span
+        if end is not None:
+            if deadline is None or end < deadline:
+                deadline = end
 
         result: List[datetime] = []
-        current = base
+        current = effective_base
         for _ in range(n):
             current = self.next_trigger(current)
-            if deadline is not None and current > deadline:
+            if deadline is not None and current >= deadline:
                 break
             result.append(current)
         return result

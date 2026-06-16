@@ -575,6 +575,17 @@ class TimeExpressionEngine:
         """
         批量解析并直接返回 JSON 字符串，方便服务端 / 命令行管道接入。
 
+        返回的 JSON 结构:
+        {
+            "results": [ ... ],          // 每条 ParseResult.as_dict()
+            "summary": {
+                "total": N, "ok": M, "fail": K,
+                "by_type": { "cron": {"ok":1,"fail":0,"total":1}, ... }
+            },
+            "elapsed_ms": 12.3,          // 本次批量解析耗时（毫秒）
+            "fail_count": K              // 失败数量（方便快速判断）
+        }
+
         JSON 格式稳定保证:
           - result 始终为 ISO 8601 字符串（带/不带时区偏移）
           - error 保留原始文本和原因
@@ -582,8 +593,18 @@ class TimeExpressionEngine:
           - meta.duration 为数值字典
           - meta.utc_offset 为 "+HH:MM" 字符串
         """
+        import time as _time
+        t0 = _time.perf_counter()
         results = self.parse_many(
             expressions, base=base, tz_name=tz_name,
             fold=fold, gap_strategy=gap_strategy,
         )
-        return ParseResult.results_to_json(results, indent=indent)
+        elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+        summary = self.summarize(results)
+        payload = {
+            "results": [r.as_dict() for r in results],
+            "summary": summary,
+            "elapsed_ms": round(elapsed_ms, 2),
+            "fail_count": summary["fail"],
+        }
+        return _json.dumps(payload, ensure_ascii=False, indent=indent)

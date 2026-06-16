@@ -395,30 +395,24 @@ def demo_batch_parse():
           f"{summary['ok']} PASS,  {summary['fail']} FAIL")
     print()
     for i, r in enumerate(results):
-        flag = f"{GREEN}OK{RESET}" if r.ok else f"{RED}NG{RESET}"
+        flag = "[OK]" if r.ok else "[FAIL]"
         extra = ""
         if r.error:
-            extra = f"  {RED}err={r.error[:50]}{RESET}"
+            extra = f"  err={r.error[:50]}"
         if r.type == "iso_datetime" and r.ok:
             extra = f"  本地化后={r.result.strftime('%Y-%m-%d %H:%M:%S %Z')}"
         if r.type == "cron" and r.ok:
             extra = f"  下次触发={r.result.strftime('%Y-%m-%d %H:%M:%S')}"
         print(
             f"  [{i:>2}] {flag}  "
-            f"type={CYAN}{r.type:<16s}{RESET}  "
+            f"type={r.type:<16s}  "
             f"raw={r.raw:<35s}"
             f"{extra}"
         )
     print()
     print("  按类型汇总:")
     for t, s in summary["by_type"].items():
-        print(f"    - {CYAN}{t:<20s}{RESET}  {s['ok']}OK / {s['fail']}FAIL / {s['total']}")
-
-
-GREEN = "\033[32m"
-RED = "\033[31m"
-CYAN = "\033[36m"
-RESET = "\033[0m"
+        print(f"    - {t:<20s}  {s['ok']}OK / {s['fail']}FAIL / {s['total']}")
 
 
 def main():

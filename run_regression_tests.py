@@ -14,13 +14,6 @@ from typing import Any, Callable, List, Optional, Tuple
 # 测试框架
 # ============================================================
 
-RED = "\033[31m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-CYAN = "\033[36m"
-BOLD = "\033[1m"
-RESET = "\033[0m"
-
 SYM_OK = "[PASS]"
 SYM_FAIL = "[FAIL]"
 SYM_LINE = "-"
@@ -40,8 +33,8 @@ class Case:
         detail = ""
         if not ok:
             detail = (
-                f"     实际值: {RED}{self.actual}{RESET}\n"
-                f"     期望值: {GREEN}{self.expected}{RESET}"
+                f"     ACTUAL:   {self.actual}\n"
+                f"     EXPECTED: {self.expected}"
             )
         return ok, detail
 
@@ -59,17 +52,17 @@ class TestModule:
 
     def run(self):
         print(f"\n{SYM_LINE * 68}")
-        print(f"  {BOLD}{CYAN}模块: {self.name}{RESET}  ({len(self.cases)} 条用例)")
+        print(f"  模块: {self.name}  ({len(self.cases)} 条用例)")
         print(f"{SYM_LINE * 68}")
         for idx, c in enumerate(self.cases):
             ok, detail = c.run()
             tag = f"[{idx + 1:>3}/{len(self.cases)}]"
             if ok:
                 self.passed += 1
-                print(f"  {GREEN}{SYM_OK}{RESET} {tag} {c.name}")
+                print(f"  {SYM_OK} {tag} {c.name}")
             else:
                 self.failed += 1
-                msg = f"  {RED}{SYM_FAIL}{RESET} {tag} {c.name}\n{detail}"
+                msg = f"  {SYM_FAIL} {tag} {c.name}\n{detail}"
                 print(msg)
                 self.failures.append(f"[{self.name}] {c.name}\n{detail}")
         self._summary()
@@ -79,11 +72,11 @@ class TestModule:
         if total == 0:
             return
         pct = self.passed * 100 // total
-        color = GREEN if self.failed == 0 else (YELLOW if self.passed > 0 else RED)
+        mark = "OK" if self.failed == 0 else "WARN"
         print(
-            f"  >> 汇总: {color}{self.passed} 通过{RESET} / "
-            f"{RED if self.failed else CYAN}{self.failed} 失败{RESET} / "
-            f"{total} 总计  ({color}{pct}%{RESET})"
+            f"  >> 汇总: [{mark}] {self.passed} 通过 / "
+            f"{self.failed} 失败 / "
+            f"{total} 总计  ({pct}%)"
         )
 
 
@@ -99,7 +92,7 @@ class TestSuite:
 
     def run(self):
         print(f"\n{SYM_DOUBLE * 68}")
-        print(f"  {BOLD}{CYAN}时间表达式解析引擎 - 回归测试{RESET}")
+        print(f"  时间表达式解析引擎 - 回归测试")
         print(f"{SYM_DOUBLE * 68}")
         for m in self.modules:
             m.run()
@@ -112,32 +105,32 @@ class TestSuite:
         failed = sum(m.failed for m in self.modules)
         pct = (passed * 100 // total) if total else 0
         print(f"\n{SYM_DOUBLE * 68}")
-        print(f"  {BOLD}总体汇总{RESET}")
+        print(f"  总体汇总")
         print(f"{SYM_DOUBLE * 68}")
         for m in self.modules:
-            mark = f"{GREEN}{SYM_OK}{RESET}" if m.failed == 0 else f"{RED}{SYM_FAIL}{RESET}"
+            mark = SYM_OK if m.failed == 0 else SYM_FAIL
             print(
                 f"  {mark} {m.name:<22s}  "
-                f"{GREEN}{m.passed:>3}OK{RESET}  "
-                f"{RED}{m.failed:>3}FAIL{RESET}  "
-                f"{CYAN}{len(m.cases):>3}{RESET}"
+                f"{m.passed:>3}OK  "
+                f"{m.failed:>3}FAIL  "
+                f"{len(m.cases):>3}"
             )
         print(
             f"  {SYM_LINE * 66}"
         )
+        overall_mark = "OK" if failed == 0 else "FAIL"
         print(
-            f"  {BOLD}{'总计':<22s}  "
-            f"{GREEN}{passed:>3}OK{RESET}  "
-            f"{RED}{failed:>3}FAIL{RESET}  "
-            f"{CYAN}{total:>3}{RESET}   "
-            f"{BOLD}{GREEN if failed == 0 else RED}{pct}%{RESET}{BOLD}{RESET}"
+            f"  [{overall_mark}] {'总计':<20s}  "
+            f"{passed:>3}OK  "
+            f"{failed:>3}FAIL  "
+            f"{total:>3}   {pct}%"
         )
         if self.all_failures:
-            print(f"\n  {RED}{BOLD}失败列表 ({len(self.all_failures)}):{RESET}")
+            print(f"\n  失败列表 ({len(self.all_failures)}):")
             for i, f in enumerate(self.all_failures, 1):
-                print(f"    {RED}{i}.{RESET} {f}")
+                print(f"    {i}. {f}")
         else:
-            print(f"\n  {GREEN}{BOLD}ALL PASSED!{RESET}")
+            print(f"\n  ALL PASSED!")
         return failed == 0
 
 
@@ -494,10 +487,10 @@ def build_suite() -> TestSuite:
         ["3天后", "P1D"], base=base_batch, tz_name=NY,
     )
     batch_parsed = _json.loads(json_batch)
-    m8.add(Case("JSON batch: 长度=2",
-               len(batch_parsed), 2))
+    m8.add(Case("JSON batch: results 长度=2",
+               len(batch_parsed["results"]), 2))
     m8.add(Case("JSON batch: [0] result 为字符串",
-               isinstance(batch_parsed[0]["result"], str), True))
+               isinstance(batch_parsed["results"][0]["result"], str), True))
 
     # ========================================================
     # 模块 9: Cron next_n_triggers with max_span
@@ -533,6 +526,85 @@ def build_suite() -> TestSuite:
     )
     m9.add(Case("max_span=0: 找到0次",
                len(n_triggers_zero), 0))
+
+    # start/end 范围查询
+    cron_hourly = CronExpression.parse("0 0 * * * ?")
+    hourly_in_range = cron_hourly.next_n_triggers(
+        100,
+        start=datetime(2024, 6, 17, 0, 0, 0),
+        end=datetime(2024, 6, 17, 5, 0, 0),
+    )
+    m9.add(Case("每小时 start/end: 0:00-5:00 内共4次 (end不含)",
+               len(hourly_in_range), 4))
+    m9.add(Case("每小时 start/end: 首次=06-17 01:00",
+               hourly_in_range[0], datetime(2024, 6, 17, 1, 0, 0)))
+    m9.add(Case("每小时 start/end: 末次=06-17 04:00",
+               hourly_in_range[-1], datetime(2024, 6, 17, 4, 0, 0)))
+
+    # 稀疏规则 + 短窗口: 立即返回空列表
+    empty_range = cron_leap.next_n_triggers(
+        10,
+        start=datetime(2024, 6, 1),
+        end=datetime(2024, 6, 30),
+    )
+    m9.add(Case("2/29 规则 窗口6月: 返回空列表",
+               empty_range, []))
+
+    # end 严格不包含
+    end_exclusive = cron_hourly.next_n_triggers(
+        100,
+        start=datetime(2024, 6, 17, 0, 0, 0),
+        end=datetime(2024, 6, 17, 3, 0, 0),
+    )
+    m9.add(Case("每小时 end=3:00 不含: 仅2次",
+               len(end_exclusive), 2))
+
+    # ========================================================
+    # 模块 10: parse_many_json 带 summary
+    # ========================================================
+    m10 = suite.module("parse_many_json 批量结果")
+
+    import json as _json
+    json_str = engine.parse_many_json(
+        ["3天后", "0 0 0 L * ?", "P1D"],
+        base=base_batch,
+    )
+    payload = _json.loads(json_str)
+    m10.add(Case("JSON payload 含 results 键",
+               "results" in payload, True))
+    m10.add(Case("JSON payload 含 summary 键",
+               "summary" in payload, True))
+    m10.add(Case("JSON payload 含 elapsed_ms 键",
+               "elapsed_ms" in payload, True))
+    m10.add(Case("JSON payload 含 fail_count 键",
+               "fail_count" in payload, True))
+    m10.add(Case("JSON payload results 长度=3",
+               len(payload["results"]), 3))
+    m10.add(Case("JSON summary.total=3",
+               payload["summary"]["total"], 3))
+    m10.add(Case("JSON summary.ok=3",
+               payload["summary"]["ok"], 3))
+    m10.add(Case("JSON summary.fail=0",
+               payload["summary"]["fail"], 0))
+    m10.add(Case("JSON elapsed_ms 为数值",
+               isinstance(payload["elapsed_ms"], (int, float)), True))
+    m10.add(Case("JSON fail_count 为 0",
+               payload["fail_count"], 0))
+
+    # 带错误的 JSON
+    json_err = engine.parse_many_json(
+        ["BAD_CRON!!!", "3天后"],
+        base=base_batch,
+    )
+    payload_err = _json.loads(json_err)
+    m10.add(Case("JSON 带错误: fail_count=1",
+               payload_err["fail_count"], 1))
+    m10.add(Case("JSON 带错误: [0] ok=False",
+               payload_err["results"][0]["ok"], False))
+    m10.add(Case("JSON 带错误: [0] error 非空",
+               bool(payload_err["results"][0]["error"]), True))
+    m10.add(Case("JSON 带错误: [1] ok=True",
+               payload_err["results"][1]["ok"], True))
 
     return suite
 
